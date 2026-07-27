@@ -28,6 +28,39 @@ const state = {
 };
 
 // ─────────────────────────────────────────────────────
+// SECURITY HELPERS
+// ─────────────────────────────────────────────────────
+
+/**
+ * Escape nilai apa pun agar aman disisipkan ke dalam HTML,
+ * baik sebagai text node maupun di dalam atribut ber-tanda-kutip ganda/tunggal.
+ * WAJIB dipakai untuk SEMUA data yang berasal dari API/user.
+ */
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+/** Format angka dengan aman meski nilainya null/undefined. */
+function formatNumber(value) {
+  return Number(value ?? 0).toLocaleString('id-ID');
+}
+
+/** Validasi URL: hanya izinkan http/https (menolak javascript:, data:, dll). */
+function isSafeHttpUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────
 // INITIALIZATION
 // ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -43,7 +76,8 @@ async function checkAuth() {
   }
 
   try {
-    const data = await apiCall('/admin/auth/me', 'GET');
+    // silent: jangan tampilkan alert error saat pengecekan awal
+    const data = await apiCall('/admin/auth/me', 'GET', null, { silent: true });
     if (data && data.telegram_id) {
       state.telegramId = data.telegram_id;
       showMainApp();
@@ -82,39 +116,49 @@ function logout() {
 // ─────────────────────────────────────────────────────
 // CORE API CALL WRAPPER
 // ─────────────────────────────────────────────────────
-async function apiCall(path, method = 'GET', body = null) {
-  const headers = {
-    'Content-Type': 'application/json'
-  };
-
-  if (state.token) {
-    headers['Authorization'] = `Bearer ${state.token}`;
-  }
+async function apiCall(path, method = 'GET', body = null, { silent = false } = {}) {
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
 
   const opts = { method, headers };
   if (body) {
     opts.body = JSON.stringify(body);
   }
 
+  let resp;
   try {
-    const resp = await fetch(`${API_BASE}${path}`, opts);
-    
-    // Autentikasi kedaluwarsa
-    if (resp.status === 401 && path !== '/admin/auth/me') {
-      alert('Sesi Anda telah kedaluwarsa. Silakan login kembali.');
-      logout();
-      return null;
-    }
-
-    const data = await resp.json();
-    if (!resp.ok) {
-      throw new Error(data.error || `HTTP ${resp.status}`);
-    }
-    return data;
-  } catch (err) {
-    alert(`Error: ${err.message}`);
-    throw err;
+    resp = await fetch(`${API_BASE}${path}`, opts);
+  } catch (networkErr) {
+    if (!silent) alert('Gagal terhubung ke server. Periksa koneksi internet Anda.');
+    throw networkErr;
   }
+
+  // Autentikasi kedaluwarsa
+  if (resp.status === 401 && path !== '/admin/auth/me') {
+    alert('Sesi Anda telah kedaluwarsa. Silakan login kembali.');
+    logout();
+    return null;
+  }
+
+  // Parse body hanya jika memang JSON (hindari "Unexpected token <" saat server balas HTML/502)
+  let data = null;
+  const contentType = resp.headers.get('content-type') || '';
+  if (resp.status !== 204 && contentType.includes('application/json')) {
+    try {
+      data = await resp.json();
+    } catch (_) {
+      data = null;
+    }
+  }
+
+  if (!resp.ok) {
+    const message = (data && data.error) ? data.error : `Server error (HTTP ${resp.status})`;
+    if (!silent) alert(`Error: ${message}`);
+    throw new Error(message);
+  }
+
+  return data ?? {};
 }
 
 // ─────────────────────────────────────────────────────
@@ -166,10 +210,11 @@ function setupEventListeners() {
         state.token = res.token;
         state.telegramId = res.admin.telegram_id;
         localStorage.setItem('admin_token', res.token);
-        
+
         // Bersihkan state OTP
         clearInterval(state.otpTimerInterval);
         state.stateToken = null;
+        document.getElementById('input-otp-code').value = '';
 
         showMainApp();
         state.activeTab = 'dashboard';
@@ -184,10 +229,36 @@ function setupEventListeners() {
     }
   });
 
+  // Login: Kirim Ulang OTP (sebelumnya tidak punya handler sama sekali)
+  document.getElementById('link-resend-otp').addEventListener('click', async (e) => {
+    e.preventDefault();
+    const tgId = document.getElementById('input-telegram-id').value.trim();
+    if (!tgId) return;
+
+    const link = e.currentTarget;
+    link.style.pointerEvents = 'none';
+    link.textContent = 'Mengirim...';
+
+    try {
+      const res = await apiCall('/admin/auth/otp-request', 'POST', { telegram_id: tgId });
+      if (res && res.ok) {
+        state.stateToken = res.state_token;
+        document.getElementById('input-otp-code').value = '';
+        startOtpTimer();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      link.style.pointerEvents = '';
+      link.textContent = 'Kirim Ulang';
+    }
+  });
+
   // Tombol Kembali dari verifikasi OTP
   document.getElementById('btn-back-to-step1').addEventListener('click', () => {
     clearInterval(state.otpTimerInterval);
     state.stateToken = null;
+    document.getElementById('input-otp-code').value = '';
     document.getElementById('form-otp-verify').style.display = 'none';
     document.getElementById('form-otp-request').style.display = 'block';
   });
@@ -222,6 +293,14 @@ function setupEventListeners() {
     loadUsersList();
   });
 
+  // Users: Enter di kolom pencarian = klik tombol Cari
+  document.getElementById('user-search-query').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('btn-search-users').click();
+    }
+  });
+
   // Users: Pagination
   document.getElementById('btn-users-prev').addEventListener('click', () => {
     if (state.users.page > 1) {
@@ -237,11 +316,63 @@ function setupEventListeners() {
     }
   });
 
+  // ── EVENT DELEGATION untuk tombol dinamis ──
+  // Menggantikan atribut onclick="..." inline yang rentan injeksi.
+
+  // Dashboard: tombol Approve pada tabel transaksi
+  document.getElementById('table-recent-payments').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action="approve"]');
+    if (btn) approvePremium(btn.dataset.userId, btn.dataset.email);
+  });
+
+  // Users: Detail / Reset PW / Ban / Unban / Hapus
+  document.getElementById('table-users-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const { action, userId, email } = btn.dataset;
+    if (action === 'detail') viewUserDetail(userId);
+    else if (action === 'reset-pw') promptResetPassword(userId, email);
+    else if (action === 'ban' || action === 'unban') toggleBanUser(userId, action);
+    else if (action === 'delete') deleteUser(userId, email);
+  });
+
+  // Pricing: submit form kartu paket (event submit ikut bubbling)
+  document.getElementById('pricing-list-container').addEventListener('submit', (e) => {
+    const form = e.target.closest('form[data-pricing-id]');
+    if (form) savePricingCard(e, form.dataset.pricingId);
+  });
+
+  // Coupons: tombol hapus kupon
+  document.getElementById('coupons-container').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action="delete-coupon"]');
+    if (btn) deleteCoupon(btn.dataset.code);
+  });
+
+  // Modals: semua tombol tutup (menggantikan onclick inline di HTML)
+  document.querySelectorAll('[data-close-modal]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const overlay = btn.closest('.modal-overlay');
+      if (overlay) overlay.classList.remove('active');
+    });
+  });
+
+  // Modals: tombol Escape menutup modal aktif
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
+    }
+  });
+
   // Settings: Simpan QRIS
   document.getElementById('form-qris-settings').addEventListener('submit', async (e) => {
     e.preventDefault();
     const url = document.getElementById('input-qris-url').value.trim();
     if (!url) return;
+
+    if (!isSafeHttpUrl(url)) {
+      alert('URL QRIS tidak valid. Gunakan alamat lengkap yang diawali http:// atau https://');
+      return;
+    }
 
     try {
       const res = await apiCall('/admin/settings/qris', 'POST', { qris_url: url });
@@ -262,12 +393,26 @@ function setupEventListeners() {
   // Coupons: Simpan kupon baru
   document.getElementById('form-create-coupon').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const code = document.getElementById('coupon-input-code').value.trim();
+    const code = document.getElementById('coupon-input-code').value.trim().toUpperCase();
     const type = document.getElementById('coupon-input-type').value;
-    const value = parseInt(document.getElementById('coupon-input-value').value);
+    const value = parseInt(document.getElementById('coupon-input-value').value, 10);
     const description = document.getElementById('coupon-input-description').value.trim();
-    const max_uses = parseInt(document.getElementById('coupon-input-max-uses').value) || 0;
+    const max_uses = parseInt(document.getElementById('coupon-input-max-uses').value, 10) || 0;
     const expired_at = document.getElementById('coupon-input-expired').value || null;
+
+    // Validasi sisi klien
+    if (!/^[A-Z0-9]+$/.test(code)) {
+      alert('Kode kupon hanya boleh berisi huruf dan angka (tanpa spasi/simbol).');
+      return;
+    }
+    if (Number.isNaN(value) || value < 1) {
+      alert('Nilai potongan harus berupa angka minimal 1.');
+      return;
+    }
+    if (type === 'percent' && value > 100) {
+      alert('Diskon persentase tidak boleh lebih dari 100%.');
+      return;
+    }
 
     try {
       const res = await apiCall('/admin/coupons', 'POST', {
@@ -313,7 +458,7 @@ function startOtpTimer() {
   clearInterval(state.otpTimerInterval);
   state.otpTimerInterval = setInterval(() => {
     state.otpCountdown--;
-    
+
     if (state.otpCountdown <= 0) {
       clearInterval(state.otpTimerInterval);
       document.getElementById('otp-timer').textContent = '00:00';
@@ -389,49 +534,51 @@ async function loadDashboardStats() {
     const data = await apiCall('/admin/stats');
     if (!data) return;
 
-    // Render Stats
-    document.getElementById('stat-total-users').textContent = data.stats.total_users.toLocaleString('id-ID');
-    document.getElementById('stat-premium-users').textContent = data.stats.premium_users.toLocaleString('id-ID');
-    document.getElementById('stat-new-users-30d').textContent = '+' + data.stats.new_users_30d.toLocaleString('id-ID');
-    document.getElementById('stat-total-revenue').textContent = 'Rp ' + data.stats.total_revenue.toLocaleString('id-ID');
+    // Render Stats (dengan guard null agar tidak crash jika field kosong)
+    const stats = data.stats || {};
+    document.getElementById('stat-total-users').textContent = formatNumber(stats.total_users);
+    document.getElementById('stat-premium-users').textContent = formatNumber(stats.premium_users);
+    document.getElementById('stat-new-users-30d').textContent = '+' + formatNumber(stats.new_users_30d);
+    document.getElementById('stat-total-revenue').textContent = 'Rp ' + formatNumber(stats.total_revenue);
 
     // Render Recent Payments
     const tbody = document.getElementById('table-recent-payments');
     tbody.innerHTML = '';
-    
-    if (!data.recent_payments.length) {
+
+    const payments = data.recent_payments || [];
+    if (!payments.length) {
       tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-dim);">Belum ada riwayat transaksi upgrade.</td></tr>';
       return;
     }
 
-    data.recent_payments.forEach(tx => {
+    payments.forEach(tx => {
       const date = formatDate(tx.created_at);
-      const amount = 'Rp ' + tx.amount.toLocaleString('id-ID');
-      
+      const amount = 'Rp ' + formatNumber(tx.amount);
+
       let statusBadge = '';
       let actionBtn = '';
-      
+
       if (tx.status === 'approved') {
         statusBadge = '<span class="badge badge-success">Approved</span>';
         actionBtn = `<span style="color: var(--text-dim); font-size: 0.8rem;">Diterima</span>`;
       } else if (tx.status === 'pending') {
         statusBadge = '<span class="badge badge-warning">Pending</span>';
         actionBtn = `
-          <button class="btn-small btn-small-success" onclick="approvePremium('${tx.user_id}', '${tx.email}')">
+          <button class="btn-small btn-small-success" data-action="approve" data-user-id="${escapeHtml(tx.user_id)}" data-email="${escapeHtml(tx.email)}">
             Approve
           </button>
         `;
       } else {
-        statusBadge = `<span class="badge badge-danger">${tx.status}</span>`;
+        statusBadge = `<span class="badge badge-danger">${escapeHtml(tx.status)}</span>`;
         actionBtn = '-';
       }
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${date}</td>
-        <td style="font-weight: 600;">${tx.email}</td>
-        <td><span class="badge badge-primary">${tx.pricing_id}</span></td>
-        <td style="font-weight: 600;">${amount}</td>
+        <td>${escapeHtml(date)}</td>
+        <td style="font-weight: 600;">${escapeHtml(tx.email)}</td>
+        <td><span class="badge badge-primary">${escapeHtml(tx.pricing_id)}</span></td>
+        <td style="font-weight: 600;">${escapeHtml(amount)}</td>
         <td>${statusBadge}</td>
         <td><div class="btn-action-group">${actionBtn}</div></td>
       `;
@@ -444,11 +591,18 @@ async function loadDashboardStats() {
 
 // Quick approve premium helper from dashboard
 async function approvePremium(userId, email) {
-  const duration = prompt(`Aktifkan premium untuk ${email}.\nMasukkan durasi paket (30d, 90d, 365d, lifetime):`, '30d');
-  if (!duration) return;
+  const input = prompt(`Aktifkan premium untuk ${email}.\nMasukkan durasi paket (30d, 90d, 365d, lifetime):`, '30d');
+  if (!input) return;
+
+  const duration = input.trim().toLowerCase();
+  const allowedDurations = ['30d', '90d', '365d', 'lifetime'];
+  if (!allowedDurations.includes(duration)) {
+    alert('Durasi tidak valid. Pilihan yang tersedia: 30d, 90d, 365d, lifetime.');
+    return;
+  }
 
   try {
-    const res = await apiCall(`/admin/users/${userId}/approve`, 'POST', { duration });
+    const res = await apiCall(`/admin/users/${encodeURIComponent(userId)}/approve`, 'POST', { duration });
     if (res && res.ok) {
       alert(`Sukses mengaktifkan paket premium (${duration}) untuk user.`);
       loadDashboardStats();
@@ -472,11 +626,11 @@ async function loadUsersList() {
     const data = await apiCall(url);
     if (!data) return;
 
-    state.users.total = data.total;
+    state.users.total = data.total ?? 0;
 
     // Render Pagination Info
-    const totalPages = Math.ceil(data.total / limit) || 1;
-    document.getElementById('users-pagination-info').textContent = `Halaman ${page} dari ${totalPages} (Total: ${data.total} user)`;
+    const totalPages = Math.ceil(state.users.total / limit) || 1;
+    document.getElementById('users-pagination-info').textContent = `Halaman ${page} dari ${totalPages} (Total: ${state.users.total} user)`;
     document.getElementById('btn-users-prev').disabled = page <= 1;
     document.getElementById('btn-users-next').disabled = page >= totalPages;
 
@@ -484,40 +638,44 @@ async function loadUsersList() {
     const tbody = document.getElementById('table-users-list');
     tbody.innerHTML = '';
 
-    if (!data.users.length) {
+    const users = data.users || [];
+    if (!users.length) {
       tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-dim);">Tidak ada user ditemukan.</td></tr>';
       return;
     }
 
-    data.users.forEach(u => {
-      const date = formatDate(u.created_at);
+    users.forEach(u => {
       const isPremium = u.plan === 'premium';
-      const statusBadge = u.is_banned 
-        ? '<span class="badge badge-danger">Banned</span>' 
+      const statusBadge = u.is_banned
+        ? '<span class="badge badge-danger">Banned</span>'
         : '<span class="badge badge-success">Aktif</span>';
-      
-      const planBadge = isPremium 
-        ? '<span class="badge badge-success">Premium</span>' 
+
+      const planBadge = isPremium
+        ? '<span class="badge badge-success">Premium</span>'
         : '<span class="badge badge-primary">Free</span>';
 
       const expDate = u.plan_expired_at ? formatDate(u.plan_expired_at).slice(0, 10) : (isPremium ? 'Lifetime' : '-');
 
+      // Semua data user di-escape; identitas tombol dibawa lewat data-attribute,
+      // bukan onclick inline, sehingga tanda kutip di nama/email tidak bisa injeksi.
+      const uid = escapeHtml(u.id);
+      const uemail = escapeHtml(u.email);
       const actionBtn = `
-        <button class="btn-small btn-small-primary" onclick="viewUserDetail('${u.id}')">Detail</button>
-        <button class="btn-small" onclick="promptResetPassword('${u.id}', '${u.email}')">Reset PW</button>
-        ${u.is_banned 
-          ? `<button class="btn-small btn-small-success" onclick="toggleBanUser('${u.id}', 'unban')">Unban</button>` 
-          : `<button class="btn-small btn-small-danger" onclick="toggleBanUser('${u.id}', 'ban')">Ban</button>`
+        <button class="btn-small btn-small-primary" data-action="detail" data-user-id="${uid}">Detail</button>
+        <button class="btn-small" data-action="reset-pw" data-user-id="${uid}" data-email="${uemail}">Reset PW</button>
+        ${u.is_banned
+          ? `<button class="btn-small btn-small-success" data-action="unban" data-user-id="${uid}">Unban</button>`
+          : `<button class="btn-small btn-small-danger" data-action="ban" data-user-id="${uid}">Ban</button>`
         }
-        <button class="btn-small btn-small-danger" style="color: var(--danger);" onclick="deleteUser('${u.id}', '${u.email}')">Hapus</button>
+        <button class="btn-small btn-small-danger" style="color: var(--danger);" data-action="delete" data-user-id="${uid}" data-email="${uemail}">Hapus</button>
       `;
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td style="font-weight: 600;">${u.name}</td>
-        <td>${u.email}</td>
+        <td style="font-weight: 600;">${escapeHtml(u.name)}</td>
+        <td>${uemail}</td>
         <td>${planBadge}</td>
-        <td>${expDate}</td>
+        <td>${escapeHtml(expDate)}</td>
         <td>${statusBadge}</td>
         <td><div class="btn-action-group">${actionBtn}</div></td>
       `;
@@ -530,36 +688,37 @@ async function loadUsersList() {
 
 async function viewUserDetail(userId) {
   try {
-    const data = await apiCall(`/admin/users/${userId}`);
+    const data = await apiCall(`/admin/users/${encodeURIComponent(userId)}`);
     if (!data) return;
 
-    const u = data.user;
-    document.getElementById('detail-user-id').textContent = u.id;
-    document.getElementById('detail-user-name').textContent = u.name;
-    document.getElementById('detail-user-email').textContent = u.email;
+    const u = data.user || {};
+    document.getElementById('detail-user-id').textContent = u.id ?? '-';
+    document.getElementById('detail-user-name').textContent = u.name ?? '-';
+    document.getElementById('detail-user-email').textContent = u.email ?? '-';
     document.getElementById('detail-user-tg-id').textContent = u.telegram_id || '-';
-    document.getElementById('detail-user-plan').innerHTML = u.plan === 'premium' 
-      ? '<span class="badge badge-success">Premium</span>' 
+    document.getElementById('detail-user-plan').innerHTML = u.plan === 'premium'
+      ? '<span class="badge badge-success">Premium</span>'
       : '<span class="badge badge-primary">Free</span>';
     document.getElementById('detail-user-expired').textContent = u.plan_expired_at ? formatDate(u.plan_expired_at) : (u.plan === 'premium' ? 'Lifetime' : '-');
-    document.getElementById('detail-user-status').innerHTML = u.is_banned 
-      ? '<span class="badge badge-danger">Banned</span>' 
+    document.getElementById('detail-user-status').innerHTML = u.is_banned
+      ? '<span class="badge badge-danger">Banned</span>'
       : '<span class="badge badge-success">Aktif</span>';
-    document.getElementById('detail-user-tx-count').textContent = data.stats.transactions_count.toLocaleString('id-ID');
+    document.getElementById('detail-user-tx-count').textContent = formatNumber(data.stats?.transactions_count);
 
     // Payments history
     const list = document.getElementById('detail-user-payments-list');
     list.innerHTML = '';
-    if (!data.payments.length) {
+    const payments = data.payments || [];
+    if (!payments.length) {
       list.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-dim);">Belum ada riwayat transaksi.</td></tr>';
     } else {
-      data.payments.forEach(p => {
+      payments.forEach(p => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${formatDate(p.created_at)}</td>
-          <td><span class="badge badge-primary">${p.pricing_id}</span></td>
-          <td style="font-weight:600;">Rp ${p.amount.toLocaleString('id-ID')}</td>
-          <td><span class="badge ${p.status === 'approved' ? 'badge-success' : 'badge-warning'}">${p.status}</span></td>
+          <td>${escapeHtml(formatDate(p.created_at))}</td>
+          <td><span class="badge badge-primary">${escapeHtml(p.pricing_id)}</span></td>
+          <td style="font-weight:600;">Rp ${escapeHtml(formatNumber(p.amount))}</td>
+          <td><span class="badge ${p.status === 'approved' ? 'badge-success' : 'badge-warning'}">${escapeHtml(p.status)}</span></td>
         `;
         list.appendChild(tr);
       });
@@ -573,10 +732,16 @@ async function viewUserDetail(userId) {
 
 async function promptResetPassword(userId, email) {
   const newPass = prompt(`Masukkan password baru untuk user ${email} (minimal 6 karakter):`);
-  if (!newPass) return;
+  if (newPass === null) return;
+
+  // Validasi yang dijanjikan label prompt, sebelumnya tidak pernah dicek
+  if (newPass.length < 6) {
+    alert('Password minimal 6 karakter.');
+    return;
+  }
 
   try {
-    const res = await apiCall(`/admin/users/${userId}/reset-password`, 'POST', { password: newPass });
+    const res = await apiCall(`/admin/users/${encodeURIComponent(userId)}/reset-password`, 'POST', { password: newPass });
     if (res && res.ok) {
       alert(`Password untuk user ${email} berhasil diubah.`);
     }
@@ -586,13 +751,13 @@ async function promptResetPassword(userId, email) {
 }
 
 async function toggleBanUser(userId, action) {
-  const confirmMsg = action === 'ban' 
-    ? 'Apakah Anda yakin ingin memblokir (ban) user ini?' 
+  const confirmMsg = action === 'ban'
+    ? 'Apakah Anda yakin ingin memblokir (ban) user ini?'
     : 'Apakah Anda yakin ingin membuka blokir (unban) user ini?';
   if (!confirm(confirmMsg)) return;
 
   try {
-    const res = await apiCall(`/admin/users/${userId}/${action}`, 'POST');
+    const res = await apiCall(`/admin/users/${encodeURIComponent(userId)}/${action}`, 'POST');
     if (res && res.ok) {
       alert(res.message);
       loadUsersList();
@@ -607,8 +772,15 @@ async function deleteUser(userId, email) {
     return;
   }
 
+  // Konfirmasi kedua: aksi destruktif permanen butuh niat eksplisit
+  const typed = prompt(`Untuk konfirmasi akhir, ketik HAPUS lalu tekan OK:`);
+  if (typed === null || typed.trim().toUpperCase() !== 'HAPUS') {
+    alert('Penghapusan dibatalkan.');
+    return;
+  }
+
   try {
-    const res = await apiCall(`/admin/users/${userId}`, 'DELETE');
+    const res = await apiCall(`/admin/users/${encodeURIComponent(userId)}`, 'DELETE');
     if (res && res.ok) {
       alert('Akun pengguna berhasil dihapus secara permanen.');
       loadUsersList();
@@ -628,32 +800,36 @@ async function loadPricingAndSettings() {
     const container = document.getElementById('pricing-list-container');
     container.innerHTML = '';
 
-    if (!pricing || !pricing.length) {
+    if (!pricing || !Array.isArray(pricing) || !pricing.length) {
       container.innerHTML = '<div style="text-align: center; grid-column: 1 / -1; color: var(--text-dim); padding: 2rem;">Tidak ada data paket.</div>';
     } else {
       pricing.forEach(p => {
         const div = document.createElement('div');
         div.className = 'pricing-card';
+        // Input memakai atribut name + form.elements (bukan id global),
+        // sehingga id paket tidak perlu disisipkan ke id elemen.
         div.innerHTML = `
           <h3 style="border-bottom: 1px solid var(--panel-border); padding-bottom: 0.5rem; margin-bottom: 1rem; color: #818cf8;">
-            Paket ${p.label} (${p.id})
+            Paket ${escapeHtml(p.label)} (${escapeHtml(p.id)})
           </h3>
-          <form onsubmit="savePricingCard(event, '${p.id}')">
+          <form data-pricing-id="${escapeHtml(p.id)}">
             <div class="form-group">
               <label>Nama Label Paket</label>
-              <input type="text" id="pricing-label-${p.id}" class="input-control" value="${p.label}" required>
+              <input type="text" name="label" class="input-control" value="${escapeHtml(p.label)}" required>
             </div>
             <div class="form-group">
               <label>Harga Paket (Rupiah)</label>
-              <input type="number" id="pricing-price-${p.id}" class="input-control" value="${p.price}" required min="0">
+              <input type="number" name="price" class="input-control" value="${escapeHtml(p.price)}" required min="0">
             </div>
             <div class="form-group">
               <label>Harga Coret (Rupiah, Opsional)</label>
-              <input type="number" id="pricing-orig-${p.id}" class="input-control" value="${p.original_price || ''}" min="0">
+              <input type="number" name="original_price" class="input-control" value="${escapeHtml(p.original_price ?? '')}" min="0">
             </div>
             <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;">
-              <input type="checkbox" id="pricing-active-${p.id}" ${p.active ? 'checked' : ''} style="width:16px; height:16px;">
-              <label for="pricing-active-${p.id}" style="margin-bottom:0; cursor:pointer;">Paket Aktif</label>
+              <label style="margin-bottom:0; cursor:pointer; display:flex; align-items:center; gap:0.5rem;">
+                <input type="checkbox" name="active" ${p.active ? 'checked' : ''} style="width:16px; height:16px;">
+                Paket Aktif
+              </label>
             </div>
             <button type="submit" class="btn-primary" style="margin-top: 1rem; padding: 0.5rem;">Update Paket</button>
           </form>
@@ -665,7 +841,7 @@ async function loadPricingAndSettings() {
     // 2. Load QRIS URL
     // Public API returns qris_url
     const pub = await apiCall('/pricing/public');
-    if (pub && pub.qris_url) {
+    if (pub && pub.qris_url && isSafeHttpUrl(pub.qris_url)) {
       document.getElementById('input-qris-url').value = pub.qris_url;
       updateQrisPreview(pub.qris_url);
     } else {
@@ -681,11 +857,25 @@ async function loadPricingAndSettings() {
 
 async function savePricingCard(e, pricingId) {
   e.preventDefault();
-  const label = document.getElementById(`pricing-label-${pricingId}`).value.trim();
-  const price = parseInt(document.getElementById(`pricing-price-${pricingId}`).value);
-  const origVal = document.getElementById(`pricing-orig-${pricingId}`).value;
-  const original_price = origVal ? parseInt(origVal) : null;
-  const active = document.getElementById(`pricing-active-${pricingId}`).checked ? 1 : 0;
+  const form = e.target;
+  const label = form.elements.label.value.trim();
+  const price = parseInt(form.elements.price.value, 10);
+  const origVal = form.elements.original_price.value;
+  const original_price = origVal ? parseInt(origVal, 10) : null;
+  const active = form.elements.active.checked ? 1 : 0;
+
+  if (!label) {
+    alert('Nama label paket tidak boleh kosong.');
+    return;
+  }
+  if (Number.isNaN(price) || price < 0) {
+    alert('Harga paket harus berupa angka valid (minimal 0).');
+    return;
+  }
+  if (original_price !== null && (Number.isNaN(original_price) || original_price < 0)) {
+    alert('Harga coret harus berupa angka valid (minimal 0).');
+    return;
+  }
 
   try {
     const res = await apiCall('/admin/pricing', 'POST', {
@@ -707,11 +897,12 @@ async function savePricingCard(e, pricingId) {
 function updateQrisPreview(url) {
   const img = document.getElementById('qris-preview-image');
   const txt = document.getElementById('qris-no-preview');
-  if (url) {
+  if (url && isSafeHttpUrl(url)) {
     img.src = url;
     img.style.display = 'inline-block';
     txt.style.display = 'none';
   } else {
+    img.removeAttribute('src');
     img.style.display = 'none';
     txt.style.display = 'block';
   }
@@ -726,28 +917,27 @@ async function loadCouponsList() {
     const container = document.getElementById('coupons-container');
     container.innerHTML = '';
 
-    if (!coupons || !coupons.length) {
+    if (!coupons || !Array.isArray(coupons) || !coupons.length) {
       container.innerHTML = '<div style="text-align: center; grid-column: 1 / -1; color: var(--text-dim); padding: 2rem;">Tidak ada kupon diskon aktif saat ini.</div>';
       return;
     }
 
     coupons.forEach(c => {
-      const typeLabel = c.type === 'percent' ? '%' : 'Rp';
-      const discVal = c.type === 'percent' ? `${c.value}%` : `Rp ${c.value.toLocaleString('id-ID')}`;
-      const uses = c.max_uses === 0 ? 'Unlimited' : `${c.used_count} / ${c.max_uses}`;
+      const discVal = c.type === 'percent' ? `${c.value ?? 0}%` : `Rp ${formatNumber(c.value)}`;
+      const uses = c.max_uses === 0 ? 'Unlimited' : `${c.used_count ?? 0} / ${c.max_uses ?? 0}`;
       const expiry = c.expired_at ? formatDate(c.expired_at).slice(0, 10) : 'Lifetime';
 
       const div = document.createElement('div');
       div.className = 'coupon-card';
       div.innerHTML = `
-        <div class="coupon-code">${c.code}</div>
-        <div class="coupon-desc">${c.description || '-'}</div>
+        <div class="coupon-code">${escapeHtml(c.code)}</div>
+        <div class="coupon-desc">${escapeHtml(c.description || '-')}</div>
         <div class="coupon-meta">
-          <strong>Potongan:</strong> ${discVal}<br>
-          <strong>Digunakan:</strong> ${uses}<br>
-          <strong>Kadaluarsa:</strong> ${expiry}
+          <strong>Potongan:</strong> ${escapeHtml(discVal)}<br>
+          <strong>Digunakan:</strong> ${escapeHtml(uses)}<br>
+          <strong>Kadaluarsa:</strong> ${escapeHtml(expiry)}
         </div>
-        <button class="btn-small btn-small-danger" style="margin-top: 1rem; width: 100%; border-color: transparent;" onclick="deleteCoupon('${c.code}')">
+        <button class="btn-small btn-small-danger" style="margin-top: 1rem; width: 100%; border-color: transparent;" data-action="delete-coupon" data-code="${escapeHtml(c.code)}">
           Hapus Kupon
         </button>
       `;
@@ -762,7 +952,7 @@ async function deleteCoupon(code) {
   if (!confirm(`Apakah Anda yakin ingin menghapus kupon "${code}"?`)) return;
 
   try {
-    const res = await apiCall(`/admin/coupons/${code}`, 'DELETE');
+    const res = await apiCall(`/admin/coupons/${encodeURIComponent(code)}`, 'DELETE');
     if (res && res.ok) {
       alert('Kupon berhasil dihapus.');
       loadCouponsList();
@@ -781,42 +971,45 @@ async function loadLogsList() {
     const data = await apiCall(`/admin/audit-logs?page=${page}&limit=${limit}`);
     if (!data) return;
 
-    state.logs.total = data.total;
+    state.logs.total = data.total ?? 0;
 
     // Pagination info
-    const totalPages = Math.ceil(data.total / limit) || 1;
-    document.getElementById('logs-pagination-info').textContent = `Halaman ${page} dari ${totalPages} (Total: ${data.total} log)`;
+    const totalPages = Math.ceil(state.logs.total / limit) || 1;
+    document.getElementById('logs-pagination-info').textContent = `Halaman ${page} dari ${totalPages} (Total: ${state.logs.total} log)`;
     document.getElementById('btn-logs-prev').disabled = page <= 1;
     document.getElementById('btn-logs-next').disabled = page >= totalPages;
 
     const tbody = document.getElementById('table-logs-list');
     tbody.innerHTML = '';
 
-    if (!data.logs.length) {
+    const logs = data.logs || [];
+    if (!logs.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-dim);">Belum ada log audit tercatat.</td></tr>';
       return;
     }
 
-    data.logs.forEach(l => {
+    logs.forEach(l => {
       const date = formatDate(l.created_at);
-      const actionBadge = `<span class="badge badge-primary">${l.action}</span>`;
-      
+      const actionBadge = `<span class="badge badge-primary">${escapeHtml(l.action)}</span>`;
+
+      // Metadata log bisa berisi input user (nama, email, dsb) —
+      // WAJIB di-escape, termasuk hasil JSON.stringify.
       let detailsStr = '';
       if (l.details) {
         try {
           const parsed = JSON.parse(l.details);
-          detailsStr = `<pre style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace; background: rgba(0,0,0,0.2); padding: 0.4rem; border-radius: 4px; overflow-x:auto; max-width: 250px;">${JSON.stringify(parsed, null, 2)}</pre>`;
+          detailsStr = `<pre style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace; background: rgba(0,0,0,0.2); padding: 0.4rem; border-radius: 4px; overflow-x:auto; max-width: 250px;">${escapeHtml(JSON.stringify(parsed, null, 2))}</pre>`;
         } catch (_) {
-          detailsStr = l.details;
+          detailsStr = escapeHtml(l.details);
         }
       }
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td style="font-size: 0.8rem; color: var(--text-muted);">${date}</td>
-        <td><code>${l.admin_id}</code></td>
+        <td style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(date)}</td>
+        <td><code>${escapeHtml(l.admin_id)}</code></td>
         <td>${actionBadge}</td>
-        <td><code>${l.target || '-'}</code></td>
+        <td><code>${escapeHtml(l.target || '-')}</code></td>
         <td>${detailsStr}</td>
       `;
       tbody.appendChild(tr);
@@ -839,11 +1032,11 @@ function closeModal(id) {
 }
 
 // Tutup modal jika user klik overlay luar
-window.onclick = function(event) {
-  if (event.target.classList.contains('modal-overlay')) {
+window.addEventListener('click', (event) => {
+  if (event.target.classList && event.target.classList.contains('modal-overlay')) {
     event.target.classList.remove('active');
   }
-};
+});
 
 function formatDate(dateStr) {
   if (!dateStr) return '-';

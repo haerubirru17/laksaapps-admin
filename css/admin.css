@@ -873,3 +873,99 @@ body::after {
   font-size: 0.85rem;
   color: var(--text-muted);
 }
+
+/* ─────────────────────────────────────────────────────
+   RESPONSIVE / MOBILE (ditambahkan saat patch keamanan)
+   ───────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .admin-app {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    width: 100%;
+  }
+
+  /* Sidebar berubah jadi bar atas dengan menu horizontal scrollable */
+  .sidebar {
+    width: 100%;
+    height: auto;
+    flex-direction: column;
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .sidebar-header {
+    padding: 0.9rem 1.2rem;
+  }
+
+  .sidebar-menu {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 0 0.8rem 0.8rem;
+    gap: 0.4rem;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar-menu .menu-item {
+    flex-shrink: 0;
+  }
+
+  .sidebar-menu .menu-item button {
+    white-space: nowrap;
+    padding: 0.5rem 0.9rem;
+  }
+
+  .sidebar-footer {
+    padding: 0.6rem 1.2rem;
+  }
+
+  .main-content {
+    height: auto;
+    width: 100%;
+    padding: 1.2rem;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.9rem;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-bar .btn-primary,
+  .filter-bar .select-control {
+    width: 100% !important;
+  }
+
+  .modal-box {
+    max-height: 90vh;
+    overflow-y: auto;
+    margin: 1rem;
+  }
+
+  .pricing-grid,
+  .coupon-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .login-card {
+    padding: 1.8rem 1.4rem;
+    margin: 1rem;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: lapisan pertahanan kedua terhadap XSS. Script hanya boleh dari origin sendiri (inline script & eval diblokir). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src https: data:; connect-src 'self' https://laksana.haerubirru17.workers.dev http://localhost:8787; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
   <title>LaksaApp — Premium Admin Panel</title>
   <link rel="stylesheet" href="css/admin.css">
 </head>
@@ -224,7 +226,6 @@
         <div class="content-panel" style="margin-bottom: 2rem;">
           <div class="panel-header">
             <h2 class="panel-title">Pengaturan Harga Paket Premium</h2>
-            <button id="btn-save-pricing" class="btn-primary" style="width: auto; padding: 0.55rem 1.5rem; font-size: 0.85rem; display: none;">Simpan Harga</button>
           </div>
           <div id="pricing-list-container" class="pricing-grid">
             <div style="text-align: center; grid-column: 1 / -1; color: var(--text-dim); padding: 2rem;">Memuat daftar paket...</div>
@@ -309,7 +310,7 @@
     <div class="modal-box">
       <div class="modal-header">
         <h2 class="modal-title">Detail Informasi User</h2>
-        <button class="btn-close" onclick="closeModal('modal-user-detail')">&times;</button>
+        <button class="btn-close" data-close-modal>&times;</button>
       </div>
       <div class="modal-body">
         <div class="profile-grid">
@@ -367,7 +368,7 @@
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn-cancel" onclick="closeModal('modal-user-detail')">Tutup</button>
+        <button class="btn-cancel" data-close-modal>Tutup</button>
       </div>
     </div>
   </div>
@@ -377,7 +378,7 @@
     <div class="modal-box" style="max-width: 480px;">
       <div class="modal-header">
         <h2 class="modal-title">Buat Kupon Diskon Baru</h2>
-        <button class="btn-close" onclick="closeModal('modal-create-coupon')">&times;</button>
+        <button class="btn-close" data-close-modal>&times;</button>
       </div>
       <form id="form-create-coupon">
         <div class="modal-body">
@@ -410,7 +411,7 @@
           </div>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn-cancel" onclick="closeModal('modal-create-coupon')">Batal</button>
+          <button type="button" class="btn-cancel" data-close-modal>Batal</button>
           <button type="submit" class="btn-primary" style="width: auto; padding: 0.7rem 2rem;">Simpan Kupon</button>
         </div>
       </form>
